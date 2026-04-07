@@ -2882,6 +2882,56 @@ fn test_is_pane_at_shell_returns_false_when_none() {
     assert!(!is_pane_at_shell(&mock, "sess:win"));
 }
 
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_detect_running_agent_from_pane_current_command() {
+    for (command, expected) in [
+        ("claude", Some("claude")),
+        ("codex", Some("codex")),
+        ("copilot", Some("copilot")),
+        ("agent", Some("cursor")),
+        ("python3", None),
+    ] {
+        let mut mock = MockTmuxOperations::new();
+        let command_value = command.to_string();
+        mock.expect_pane_current_command()
+            .withf(|t| t == "sess:win")
+            .returning(move |_| Some(command_value.clone()));
+        let detected = detect_running_agent(&mock, "sess:win");
+        assert_eq!(detected.as_deref(), expected, "command={}", command);
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_detect_running_agent_from_indicator_when_node() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("node".to_string()));
+    mock.expect_capture_pane()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Ok("line 1\nOpenAI Codex\n> ".to_string()));
+
+    let detected = detect_running_agent(&mock, "sess:win");
+    assert_eq!(detected.as_deref(), Some("codex"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_detect_running_agent_none_when_shell_without_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Ok("$ ".to_string()));
+
+    let detected = detect_running_agent(&mock, "sess:win");
+    assert_eq!(detected, None);
+}
+
 // === switch_agent_in_tmux tests ===
 
 /// Test that switch_agent_in_tmux sends the correct exit command per agent
@@ -5149,6 +5199,7 @@ fn make_session_task_status(
         worktree_path: None,
         session_name: None,
         agent: "claude".to_string(),
+        detected_agent: None,
         was_ready,
     }
 }
@@ -5215,6 +5266,7 @@ fn test_apply_session_refresh_working_becomes_idle_after_15s() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            detected_agent: None,
             was_ready: false,
         }],
     };
@@ -5242,6 +5294,7 @@ fn test_apply_session_refresh_working_stays_working_hash_changed() {
             worktree_path: None,
             session_name: None,
             agent: "claude".to_string(),
+            detected_agent: None,
             was_ready: false,
         }],
     };
@@ -5344,6 +5397,47 @@ fn test_apply_session_refresh_multiple_tasks() {
     assert_eq!(app.state.phase_status_cache["t1"].0, PhaseStatus::Working);
     assert_eq!(app.state.phase_status_cache["t2"].0, PhaseStatus::Ready);
     assert_eq!(app.state.phase_status_cache["t3"].0, PhaseStatus::Idle);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_apply_session_refresh_syncs_detected_agent() {
+    let mut app = make_test_app();
+
+    let mut task = make_test_task("t1", "My task", TaskStatus::Running);
+    task.agent = "claude".to_string();
+    task.updated_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    let result = SessionRefreshResult {
+        statuses: vec![SessionTaskStatus {
+            task_id: "t1".to_string(),
+            phase_status: PhaseStatus::Working,
+            content_hash: None,
+            status: TaskStatus::Running,
+            worktree_path: None,
+            session_name: None,
+            agent: "claude".to_string(),
+            detected_agent: Some("codex".to_string()),
+            was_ready: false,
+        }],
+    };
+
+    app.apply_session_refresh(result);
+
+    let board_task = app.state.board.tasks.iter().find(|t| t.id == "t1").unwrap();
+    assert_eq!(board_task.agent, "codex");
+
+    let db_task = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(db_task.agent, "codex");
 }
 
 // =============================================================================
@@ -7766,6 +7860,46 @@ fn test_save_task_updates_existing_task() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn test_save_task_preserves_agent_for_non_backlog_task() {
+    let mut app = make_test_app();
+
+    let mut original = make_test_task("edit-running", "Original Title", TaskStatus::Running);
+    original.agent = "codex".to_string();
+    app.state
+        .db
+        .as_ref()
+        .unwrap()
+        .create_task(&original)
+        .unwrap();
+    app.refresh_tasks().unwrap();
+
+    app.state.pending_task_title = "Updated Title".to_string();
+    app.state.input_buffer = "Updated description".to_string();
+    app.state.editing_task_id = Some("edit-running".to_string());
+    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
+        name: "agtx".to_string(),
+        label: "agtx".to_string(),
+        description: "".to_string(),
+        active: true,
+    }];
+    app.state.wizard_selected_plugin = 0;
+
+    app.save_task().unwrap();
+
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("edit-running")
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.status, TaskStatus::Running);
+    assert_eq!(updated.agent, "codex");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn test_save_task_empty_description_stored_as_none() {
     let mut app = make_test_app();
 
@@ -8336,14 +8470,12 @@ fn test_switch_agent_opencode_sends_exit() {
     let mut mock_tmux = MockTmuxOperations::new();
     let exit_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exit_sent_c = exit_sent.clone();
-    mock_tmux
-        .expect_send_keys()
-        .returning(move |_, cmd| {
-            if cmd == "/exit" {
-                exit_sent_c.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            Ok(())
-        });
+    mock_tmux.expect_send_keys().returning(move |_, cmd| {
+        if cmd == "/exit" {
+            exit_sent_c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    });
     mock_tmux
         .expect_send_keys_literal()
         .returning(|_, _| Ok(()));
@@ -8455,7 +8587,9 @@ fn test_write_skills_to_worktree_cursor() {
 
     // Cursor uses subdirectories with SKILL.md (same structure as Codex)
     assert!(
-        dir.path().join(".cursor/skills/agtx-plan/SKILL.md").exists(),
+        dir.path()
+            .join(".cursor/skills/agtx-plan/SKILL.md")
+            .exists(),
         ".cursor/skills/agtx-plan/SKILL.md should exist"
     );
     assert!(
@@ -8479,11 +8613,7 @@ fn test_artifact_path_exists_zero_padded() {
     std::fs::write(phase_dir.join("PLAN.md"), "plan").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 1),
         "should find zero-padded path 01/PLAN.md for cycle 1"
     );
 }
@@ -8497,11 +8627,7 @@ fn test_artifact_path_exists_non_padded_fallback() {
     std::fs::write(phase_dir.join("PLAN.md"), "plan").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 1),
         "should fall back to non-padded path 1/PLAN.md when 01 is missing"
     );
 }
@@ -8515,19 +8641,11 @@ fn test_artifact_path_exists_cycle_2_zero_padded() {
     std::fs::write(phase_dir.join("PLAN.md"), "plan").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            2
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 2),
         "cycle 2 should match 02/PLAN.md"
     );
     assert!(
-        !artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            1
-        ),
+        !artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 1),
         "cycle 1 should not match 02/PLAN.md"
     );
 }
@@ -8539,19 +8657,11 @@ fn test_artifact_path_exists_no_phase_placeholder() {
     std::fs::write(dir.path().join("CONTEXT.md"), "ctx").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "CONTEXT.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "CONTEXT.md", 1),
         "should find plain file with no {{phase}} placeholder"
     );
     assert!(
-        !artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "MISSING.md",
-            1
-        ),
+        !artifact_path_exists(&dir.path().to_string_lossy(), "MISSING.md", 1),
         "should return false for missing plain file"
     );
 }
@@ -8563,19 +8673,11 @@ fn test_artifact_path_exists_glob_pattern() {
     std::fs::write(dir.path().join("01-CONTEXT.md"), "ctx").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}-CONTEXT.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}-CONTEXT.md", 1),
         "wildcard pattern should match 01-CONTEXT.md for cycle 1"
     );
     assert!(
-        !artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}-CONTEXT.md",
-            2
-        ),
+        !artifact_path_exists(&dir.path().to_string_lossy(), "{phase}-CONTEXT.md", 2),
         "wildcard pattern should not match cycle 2 when only cycle 1 file exists"
     );
 }
@@ -8589,11 +8691,7 @@ fn test_research_artifact_exists_no_plugin() {
     // No plugin → always false
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        !research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &None
-        ),
+        !research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &None),
         "no plugin should return false"
     );
 }
@@ -8612,11 +8710,7 @@ fn test_research_artifact_exists_no_artifact_in_plugin() {
 
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        !research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &Some(plugin)
-        ),
+        !research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &Some(plugin)),
         "plugin with no research artifact should return false"
     );
 }
@@ -8640,11 +8734,7 @@ fn test_research_artifact_exists_file_present() {
     std::fs::write(planning_dir.join("task-123-CONTEXT.md"), "ctx").unwrap();
 
     assert!(
-        research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &Some(plugin)
-        ),
+        research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &Some(plugin)),
         "should find artifact when file matching {{task_id}} template exists"
     );
 }
@@ -8663,11 +8753,7 @@ fn test_research_artifact_exists_file_missing() {
 
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        !research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &Some(plugin)
-        ),
+        !research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &Some(plugin)),
         "should return false when artifact file is missing"
     );
 }
@@ -8697,7 +8783,10 @@ fn test_deploy_skill_claude_transforms_frontmatter() {
     deploy_skill(dir.path(), "agtx-plan", content, "claude");
 
     let native = dir.path().join(".claude/commands/agtx/plan.md");
-    assert!(native.exists(), ".claude/commands/agtx/plan.md should be written");
+    assert!(
+        native.exists(),
+        ".claude/commands/agtx/plan.md should be written"
+    );
     let written = std::fs::read_to_string(&native).unwrap();
     assert!(
         written.contains("name: agtx:plan"),
@@ -8713,10 +8802,19 @@ fn test_deploy_skill_gemini_writes_toml() {
     deploy_skill(dir.path(), "agtx-plan", content, "gemini");
 
     let native = dir.path().join(".gemini/commands/agtx/plan.toml");
-    assert!(native.exists(), ".gemini/commands/agtx/plan.toml should be written");
+    assert!(
+        native.exists(),
+        ".gemini/commands/agtx/plan.toml should be written"
+    );
     let written = std::fs::read_to_string(&native).unwrap();
-    assert!(written.contains("description"), "gemini toml should have description field");
-    assert!(written.contains("prompt"), "gemini toml should have prompt field");
+    assert!(
+        written.contains("description"),
+        "gemini toml should have description field"
+    );
+    assert!(
+        written.contains("prompt"),
+        "gemini toml should have prompt field"
+    );
 }
 
 #[test]
@@ -8740,7 +8838,10 @@ fn test_deploy_skill_opencode_writes_flat_md() {
     deploy_skill(dir.path(), "agtx-plan", content, "opencode");
 
     let native = dir.path().join(".opencode/command/agtx-plan.md");
-    assert!(native.exists(), ".opencode/command/agtx-plan.md should be written");
+    assert!(
+        native.exists(),
+        ".opencode/command/agtx-plan.md should be written"
+    );
     let written = std::fs::read_to_string(&native).unwrap();
     assert!(
         written.starts_with("---\ndescription:"),
@@ -8756,7 +8857,9 @@ fn test_deploy_skill_cursor_writes_skill_subdir() {
     deploy_skill(dir.path(), "agtx-plan", content, "cursor");
 
     assert!(
-        dir.path().join(".cursor/skills/agtx-plan/SKILL.md").exists(),
+        dir.path()
+            .join(".cursor/skills/agtx-plan/SKILL.md")
+            .exists(),
         ".cursor/skills/agtx-plan/SKILL.md should be written"
     );
 }
@@ -8796,7 +8899,10 @@ fn test_load_task_plugin_supported_agent_returns_plugin() {
     task.plugin = Some("agtx".to_string());
     // "agtx" bundled plugin has empty supported_agents (all supported)
     let plugin = load_task_plugin(&task, None, "claude");
-    assert!(plugin.is_some(), "agtx plugin should be returned for claude");
+    assert!(
+        plugin.is_some(),
+        "agtx plugin should be returned for claude"
+    );
 }
 
 #[test]
@@ -8805,11 +8911,7 @@ fn test_load_task_plugin_unsupported_agent_returns_none_explicit() {
     use crate::db::Task;
 
     let dir = tempfile::tempdir().unwrap();
-    let plugin_dir = dir
-        .path()
-        .join(".agtx")
-        .join("plugins")
-        .join("gemini-only");
+    let plugin_dir = dir.path().join(".agtx").join("plugins").join("gemini-only");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::write(
         plugin_dir.join("plugin.toml"),
@@ -8916,7 +9018,12 @@ fn test_load_plugin_if_configured_unknown_plugin_falls_back_to_agtx() {
 
 #[test]
 fn test_resolve_skill_content_no_plugin_returns_default() {
-    let result = resolve_skill_content(&None, "agtx-plan", std::path::Path::new("/tmp"), "default content");
+    let result = resolve_skill_content(
+        &None,
+        "agtx-plan",
+        std::path::Path::new("/tmp"),
+        "default content",
+    );
     assert_eq!(result, "default content");
 }
 
@@ -8936,23 +9043,22 @@ fn test_resolve_skill_content_plugin_override_on_disk() {
     )
     .unwrap();
 
-    let plugin: WorkflowPlugin = toml::from_str(
-        "name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n",
-    )
-    .unwrap();
+    let plugin: WorkflowPlugin =
+        toml::from_str("name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n").unwrap();
 
     let result = resolve_skill_content(&Some(plugin), "agtx-plan", dir.path(), "default content");
-    assert_eq!(result, "custom plan skill", "plugin override should take precedence");
+    assert_eq!(
+        result, "custom plan skill",
+        "plugin override should take precedence"
+    );
 }
 
 #[test]
 fn test_resolve_skill_content_plugin_no_override_returns_default() {
     // Plugin configured but no custom skill file → returns default
     use crate::config::WorkflowPlugin;
-    let plugin: WorkflowPlugin = toml::from_str(
-        "name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n",
-    )
-    .unwrap();
+    let plugin: WorkflowPlugin =
+        toml::from_str("name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n").unwrap();
 
     let result = resolve_skill_content(
         &Some(plugin),
@@ -8960,7 +9066,10 @@ fn test_resolve_skill_content_plugin_no_override_returns_default() {
         std::path::Path::new("/nonexistent"),
         "default content",
     );
-    assert_eq!(result, "default content", "should fall back to default when no override on disk");
+    assert_eq!(
+        result, "default content",
+        "should fall back to default when no override on disk"
+    );
 }
 
 // =============================================================================
@@ -9031,7 +9140,10 @@ fn test_wait_for_prompt_trigger_returns_false_on_timeout() {
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     // Verify that the trigger IS found when present (positive case — complements the timeout)
     let result = wait_for_prompt_trigger(&tmux, "sess:win", "no trigger here", &[]);
-    assert!(result, "trigger present in first response should return true immediately");
+    assert!(
+        result,
+        "trigger present in first response should return true immediately"
+    );
 }
 
 #[test]
@@ -9115,9 +9227,10 @@ fn test_project_delete_confirm_popup_opens_on_x() {
     let mut app = make_test_app();
     app.state.sidebar_visible = true;
     app.state.sidebar_focused = true;
-    app.state.projects = vec![
-        ProjectInfo { name: "proj-a".to_string(), path: "/tmp/proj-a".to_string() },
-    ];
+    app.state.projects = vec![ProjectInfo {
+        name: "proj-a".to_string(),
+        path: "/tmp/proj-a".to_string(),
+    }];
     app.state.selected_project = 0;
 
     press_key(&mut app, KeyCode::Char('x'));
@@ -9179,9 +9292,10 @@ fn test_init_script_editor_opens_on_i() {
     let mut app = make_test_app();
     app.state.sidebar_visible = true;
     app.state.sidebar_focused = true;
-    app.state.projects = vec![
-        ProjectInfo { name: "proj-a".to_string(), path: "/tmp/proj-a".to_string() },
-    ];
+    app.state.projects = vec![ProjectInfo {
+        name: "proj-a".to_string(),
+        path: "/tmp/proj-a".to_string(),
+    }];
     app.state.selected_project = 0;
 
     press_key(&mut app, KeyCode::Char('i'));
@@ -9439,15 +9553,27 @@ fn test_refresh_task_session_kills_and_recreates() {
         Arc::new(mock_registry),
     )
     .unwrap();
+    app.state.config.phase_agents.running = Some("codex".to_string());
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Running);
+    task.agent = "claude".to_string();
     task.worktree_path = Some("/tmp/wt".to_string());
     task.session_name = Some("proj:task-abc".to_string());
-    app.state.board.tasks = vec![task];
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
     app.state.board.selected_column = 2;
 
     let result = app.refresh_task_session();
     assert!(result.is_ok());
     // warning_message is set after a successful refresh
     assert!(app.state.warning_message.is_some());
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.agent, "codex");
 }
