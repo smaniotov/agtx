@@ -230,6 +230,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `d` | Show git diff for task |
 | `m` | Move task forward (advance workflow) |
 | `r` | Resume task (Review → Running) |
+| `Ctrl+r` | Refresh session: kill and recreate agent window, re-send phase skill/prompt |
 | `/` | Search tasks (jumps to and opens task) |
 | `P` | Select workflow plugin |
 | `O` | Toggle orchestrator agent (experimental) |
@@ -242,6 +243,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
 | `Ctrl+d/u` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
+| `Ctrl+r` | Refresh session: kill and recreate active tab's tmux window |
 | `Ctrl+q` or `Esc` | Close popup |
 | Other keys | Forwarded to tmux/agent |
 
