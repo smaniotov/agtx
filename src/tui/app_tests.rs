@@ -9298,3 +9298,156 @@ fn test_init_script_editor_loads_existing_file() {
     assert_eq!(app.state.input_mode, InputMode::InputInitScript);
     assert_eq!(app.state.input_buffer, "echo existing");
 }
+
+// --- refresh_task_session ---
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_refresh_task_session_no_worktree() {
+    // Task without worktree_path → early return, no tmux calls
+    let mock_tmux = MockTmuxOperations::new(); // no expectations set
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    let mut task = make_test_task("t1", "My task", TaskStatus::Running);
+    task.session_name = Some("proj:task-abc".to_string());
+    task.worktree_path = None;
+    app.state.board.tasks = vec![task];
+    app.state.board.selected_column = 2; // Running column
+
+    let result = app.refresh_task_session();
+    assert!(result.is_ok());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_refresh_task_session_no_session() {
+    // Task without session_name → early return, no tmux calls
+    let mock_tmux = MockTmuxOperations::new(); // no expectations set
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    let mut task = make_test_task("t1", "My task", TaskStatus::Running);
+    task.worktree_path = Some("/tmp/wt".to_string());
+    task.session_name = None;
+    app.state.board.tasks = vec![task];
+    app.state.board.selected_column = 2;
+
+    let result = app.refresh_task_session();
+    assert!(result.is_ok());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_refresh_task_session_backlog_noop() {
+    // Backlog task has no worktree → early return with no tmux calls
+    let mock_tmux = MockTmuxOperations::new(); // no expectations set
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    let task = make_test_task("t1", "My task", TaskStatus::Backlog);
+    app.state.board.tasks = vec![task];
+    app.state.board.selected_column = 0;
+
+    let result = app.refresh_task_session();
+    assert!(result.is_ok());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_refresh_task_session_invalid_session_format() {
+    // session_name without ':' → split_once returns None → early return before create_window
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_kill_window()
+        .times(1)
+        .returning(|_| Ok(()));
+    // has_session and create_window must NOT be called
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    let mut task = make_test_task("t1", "My task", TaskStatus::Running);
+    task.worktree_path = Some("/tmp/wt".to_string());
+    task.session_name = Some("invalid-no-colon".to_string());
+    app.state.board.tasks = vec![task];
+    app.state.board.selected_column = 2;
+
+    let result = app.refresh_task_session();
+    assert!(result.is_ok());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_refresh_task_session_kills_and_recreates() {
+    // Running task with valid session → kill_window + has_session + create_window called
+    use crate::agent::MockAgentRegistry;
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_kill_window()
+        .withf(|t| t == "proj:task-abc")
+        .times(1)
+        .returning(|_| Ok(()));
+    mock_tmux
+        .expect_has_session()
+        .withf(|s| s == "proj")
+        .times(1)
+        .returning(|_| true);
+    mock_tmux
+        .expect_create_window()
+        .withf(|session, window, _dir, _cmd| session == "proj" && window == "task-abc")
+        .times(1)
+        .returning(|_, _, _, _| Ok(()));
+
+    let mut mock_registry = MockAgentRegistry::new();
+    mock_registry.expect_get().returning(|_| {
+        let mut agent_ops = crate::agent::MockAgentOperations::new();
+        agent_ops
+            .expect_build_interactive_command()
+            .return_const("claude --dangerously-skip-permissions".to_string());
+        Arc::new(agent_ops)
+    });
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(mock_registry),
+    )
+    .unwrap();
+
+    let mut task = make_test_task("t1", "My task", TaskStatus::Running);
+    task.worktree_path = Some("/tmp/wt".to_string());
+    task.session_name = Some("proj:task-abc".to_string());
+    app.state.board.tasks = vec![task];
+    app.state.board.selected_column = 2;
+
+    let result = app.refresh_task_session();
+    assert!(result.is_ok());
+    // warning_message is set after a successful refresh
+    assert!(app.state.warning_message.is_some());
+}

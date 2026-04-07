@@ -2542,7 +2542,16 @@ impl App {
         match &self.state.mode {
             AppMode::Dashboard => self.handle_dashboard_key(key.code),
             AppMode::Project(_) => match self.state.input_mode {
-                InputMode::Normal => self.handle_normal_key(key.code),
+                InputMode::Normal => {
+                    if key.code == KeyCode::Char('r')
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        return self.refresh_task_session();
+                    }
+                    self.handle_normal_key(key.code)
+                }
                 InputMode::InputTitle => self.handle_title_input(key),
                 InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
                 InputMode::InputDescription => self.handle_description_input(key),
@@ -3374,6 +3383,10 @@ impl App {
                     TaskTab::Terminal => popup.terminal_scroll = 0,
                     TaskTab::Diff => {}
                 },
+                // Ctrl+r = kill and recreate the active tab's tmux window
+                KeyCode::Char('r') if has_ctrl => {
+                    self.refresh_shell_popup()?;
+                }
                 _ => match popup.active_tab {
                     TaskTab::Agent => {
                         // Forward all other keys to the agent tmux window
@@ -4966,6 +4979,253 @@ impl App {
             );
         });
         Ok(false)
+    }
+
+    /// Ctrl+R: kill the agent tmux window for the selected task and recreate it,
+    /// restarting the agent and re-sending the skill/prompt for the current phase.
+    fn refresh_task_session(&mut self) -> Result<()> {
+        let task = match self.state.board.selected_task() {
+            Some(t) => t.clone(),
+            None => return Ok(()),
+        };
+
+        let worktree_path = match task.worktree_path.clone() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let session_name = match task.session_name.clone() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let phase = match task.status {
+            TaskStatus::Planning => "planning",
+            TaskStatus::Running => "running",
+            TaskStatus::Review => "review",
+            _ => return Ok(()),
+        };
+
+        // Kill the existing window (ignore error — may already be dead)
+        let _ = self.state.tmux_ops.kill_window(&session_name);
+
+        // session_name = "tmux_session:window_name"
+        let (tmux_session, window_name) = match session_name.split_once(':') {
+            Some((s, w)) => (s.to_string(), w.to_string()),
+            None => return Ok(()),
+        };
+
+        if !self.state.tmux_ops.has_session(&tmux_session) {
+            let _ = self
+                .state
+                .tmux_ops
+                .create_session(&tmux_session, &worktree_path);
+        }
+
+        let (target_agent, _) = needs_agent_switch(&self.state.config, &task, phase);
+        let agent_ops = self.state.agent_registry.get(&target_agent);
+        let agent_cmd = agent_ops.build_interactive_command("");
+
+        self.state.tmux_ops.create_window(
+            &tmux_session,
+            &window_name,
+            &worktree_path,
+            Some(agent_cmd),
+        )?;
+
+        let plugin = self.load_task_plugin(&task);
+        let task_content = task.content_text();
+        let phase_variant = determine_phase_variant(
+            phase,
+            task.worktree_path.as_deref(),
+            &task.id,
+            &plugin,
+            task.cycle,
+        );
+        let skill_cmd =
+            resolve_skill_command(&plugin, phase_variant, &target_agent, &task_content, task.cycle);
+        let prompt = resolve_prompt(&plugin, phase_variant, &task_content, &task.id, task.cycle);
+        let prompt_trigger = resolve_prompt_trigger(&plugin, phase_variant);
+        let auto_dismiss = plugin
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+
+        // Spawn a thread to wait for the agent to be ready then send the skill/prompt.
+        // Unlike spawn_send_to_agent, we always wait for ready because the window was
+        // just recreated.
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        std::thread::spawn(move || {
+            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &session_name) {
+                send_skill_and_prompt(
+                    &tmux_ops,
+                    &ready_target,
+                    &skill_cmd,
+                    &prompt,
+                    &prompt_trigger,
+                    &task_content,
+                    &target_agent,
+                    &auto_dismiss,
+                );
+            }
+        });
+
+        self.state.warning_message = Some((
+            format!("Session refreshed: {}", task.title),
+            Instant::now(),
+        ));
+
+        Ok(())
+    }
+
+    /// Ctrl+R from within the shell popup: kill and recreate the active tab's tmux window.
+    /// Agent tab → kills the agent window, restarts it, re-sends the phase skill/prompt.
+    /// Terminal tab → kills the plain-shell window and recreates it.
+    /// Diff tab → no-op (read-only view).
+    fn refresh_shell_popup(&mut self) -> Result<()> {
+        use shell_popup::TaskTab;
+
+        let popup = match self.state.shell_popup.clone() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        match popup.active_tab {
+            TaskTab::Agent => {
+                // popup.window_name = "tmux_session:task-{slug}"
+                let _ = self.state.tmux_ops.kill_window(&popup.window_name);
+
+                let (tmux_session, window_name) = match popup.window_name.split_once(':') {
+                    Some((s, w)) => (s.to_string(), w.to_string()),
+                    None => return Ok(()),
+                };
+
+                // Look up task to get worktree_path, agent, plugin, and status
+                let task = popup
+                    .task_id
+                    .as_deref()
+                    .and_then(|id| self.state.db.as_ref()?.get_task(id).ok().flatten());
+
+                let (worktree_path, phase, target_agent, plugin, task_content, task_id, cycle) =
+                    match task {
+                        Some(ref t) => {
+                            let phase = match t.status {
+                                TaskStatus::Planning => "planning",
+                                TaskStatus::Running => "running",
+                                TaskStatus::Review => "review",
+                                _ => return Ok(()),
+                            };
+                            let (agent, _) = needs_agent_switch(&self.state.config, t, phase);
+                            let plugin = self.load_task_plugin(t);
+                            (
+                                t.worktree_path.clone().unwrap_or_default(),
+                                phase,
+                                agent,
+                                plugin,
+                                t.content_text(),
+                                t.id.clone(),
+                                t.cycle,
+                            )
+                        }
+                        None => return Ok(()),
+                    };
+
+                if !self.state.tmux_ops.has_session(&tmux_session) {
+                    let _ = self
+                        .state
+                        .tmux_ops
+                        .create_session(&tmux_session, &worktree_path);
+                }
+
+                let agent_ops = self.state.agent_registry.get(&target_agent);
+                let agent_cmd = agent_ops.build_interactive_command("");
+                self.state.tmux_ops.create_window(
+                    &tmux_session,
+                    &window_name,
+                    &worktree_path,
+                    Some(agent_cmd),
+                )?;
+
+                let phase_variant = determine_phase_variant(
+                    phase,
+                    Some(&worktree_path),
+                    &task_id,
+                    &plugin,
+                    cycle,
+                );
+                let skill_cmd = resolve_skill_command(
+                    &plugin,
+                    phase_variant,
+                    &target_agent,
+                    &task_content,
+                    cycle,
+                );
+                let prompt =
+                    resolve_prompt(&plugin, phase_variant, &task_content, &task_id, cycle);
+                let prompt_trigger = resolve_prompt_trigger(&plugin, phase_variant);
+                let auto_dismiss = plugin
+                    .as_ref()
+                    .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+                let full_target = popup.window_name.clone();
+
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                std::thread::spawn(move || {
+                    if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &full_target) {
+                        send_skill_and_prompt(
+                            &tmux_ops,
+                            &ready_target,
+                            &skill_cmd,
+                            &prompt,
+                            &prompt_trigger,
+                            &task_content,
+                            &target_agent,
+                            &auto_dismiss,
+                        );
+                    }
+                });
+            }
+            TaskTab::Terminal => {
+                // terminal_window_name is just the window name (may contain the session prefix
+                // as part of the name itself, matching how it was created)
+                let term_target = format!(
+                    "{}:{}",
+                    self.state.tmux_project_name, popup.terminal_window_name
+                );
+                let _ = self.state.tmux_ops.kill_window(&term_target);
+
+                let working_dir = popup
+                    .task_id
+                    .as_deref()
+                    .and_then(|id| self.state.db.as_ref()?.get_task(id).ok().flatten())
+                    .and_then(|t| t.worktree_path)
+                    .unwrap_or_else(|| {
+                        self.state
+                            .project_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
+
+                if !self
+                    .state
+                    .tmux_ops
+                    .has_session(&self.state.tmux_project_name)
+                {
+                    let _ = self.state.tmux_ops.create_session(
+                        &self.state.tmux_project_name,
+                        &working_dir,
+                    );
+                }
+
+                let _ = self.state.tmux_ops.create_window(
+                    &self.state.tmux_project_name,
+                    &popup.terminal_window_name,
+                    &working_dir,
+                    None,
+                );
+            }
+            TaskTab::Diff => {}
+        }
+
+        Ok(())
     }
 
     /// Start a research session for a Backlog task (creates worktree, reused in planning)
