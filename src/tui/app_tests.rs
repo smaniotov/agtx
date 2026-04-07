@@ -9413,6 +9413,47 @@ fn test_init_script_editor_loads_existing_file() {
     assert_eq!(app.state.input_buffer, "echo existing");
 }
 
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_project_reloads_init_script_config() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let project_path = tmp.path().to_path_buf();
+    let project_config = ProjectConfig {
+        init_script: Some("echo from switched project".to_string()),
+        ..ProjectConfig::default()
+    };
+    project_config.save(&project_path).unwrap();
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| true);
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    assert!(app.state.config.init_script.is_none());
+
+    let project = ProjectInfo {
+        name: "switched-project".to_string(),
+        path: project_path.to_string_lossy().to_string(),
+    };
+
+    app.switch_to_project_keep_sidebar(&project).unwrap();
+
+    assert_eq!(
+        app.state.config.init_script,
+        Some("echo from switched project".to_string())
+    );
+}
+
 // --- refresh_task_session ---
 
 #[test]

@@ -6747,6 +6747,10 @@ impl App {
             }
         }
 
+        let global_config = GlobalConfig::load().unwrap_or_default();
+        let project_config = ProjectConfig::load(&project_path).unwrap_or_default();
+        self.state.config = MergedConfig::merge(&global_config, &project_config);
+
         // Update last_opened in global db
         let proj = crate::db::Project::new(&project.name, &project.path);
         let _ = self.state.global_db.upsert_project(&proj);
