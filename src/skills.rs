@@ -98,12 +98,14 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
             Some(canonical_cmd.replacen(':', "-", 1))
         }
         "codex" => {
-            // /gsd:plan-phase 1 → $gsd-plan-phase 1
+            // /agtx:research Do task → $agtx-research
+            // Skill picker only matches exact name — strip args after first whitespace.
             let transformed = canonical_cmd.replacen(':', "-", 1);
-            if let Some(rest) = transformed.strip_prefix('/') {
+            let name_only = transformed.split_whitespace().next().unwrap_or(&transformed);
+            if let Some(rest) = name_only.strip_prefix('/') {
                 Some(format!("${}", rest))
             } else {
-                Some(transformed)
+                Some(name_only.to_string())
             }
         }
         "cursor" => {
