@@ -259,7 +259,8 @@ The wizard flow is: **Title → Plugin → Prompt** (plugin step auto-skipped if
 |-----|--------|
 | `j/k` or arrows | Navigate plugin list |
 | `Tab` | Cycle through options |
-| `Enter` | Advance to next step / save |
+| `Enter` | Advance to next step (title/plugin); insert newline (description) |
+| `Ctrl+S` | Save/confirm prompt (description step only) |
 | `Esc` | Cancel wizard |
 
 Agent is determined by `config.default_agent` (set via config file), not selected per-task.
@@ -271,7 +272,8 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 | `#` or `@` | Start file search (fuzzy find) |
 | `/` | Start skill search (at start of line or after space) |
 | `!` | Start task reference search (at start of line or after space) |
-| `\` + Enter | Line continuation (multi-line) |
+| `Enter` | Insert newline (multi-line input) |
+| `Ctrl+S` | Save/confirm prompt |
 | Arrow keys | Move cursor |
 | `Alt+Left/Right` or `Alt+b/f` | Word-by-word navigation |
 | `Home/End` | Jump to start/end |

@@ -1391,7 +1391,8 @@ fn test_footer_text_input_description() {
     assert!(text.contains("[#] files"));
     assert!(text.contains("[/] skills"));
     assert!(text.contains("[!] tasks"));
-    assert!(text.contains("[\\+Enter] newline"));
+    assert!(text.contains("[Ctrl+S] save"));
+    assert!(text.contains("[Enter] newline"));
 }
 
 // =============================================================================
@@ -3776,6 +3777,13 @@ fn press_key(app: &mut App, code: KeyCode) {
     .unwrap();
 }
 
+/// Helper: simulate a key press with modifiers.
+#[cfg(feature = "test-mocks")]
+fn press_key_mod(app: &mut App, code: KeyCode, modifiers: crossterm::event::KeyModifiers) {
+    app.handle_key(crossterm::event::KeyEvent::new(code, modifiers))
+        .unwrap();
+}
+
 /// Helper: simulate typing a string into the App (character by character).
 #[cfg(feature = "test-mocks")]
 fn type_str(app: &mut App, s: &str) {
@@ -3845,8 +3853,12 @@ fn test_create_task_full_flow() {
     // Type a description
     type_str(&mut app, "Users report 500 error on the login page");
 
-    // Press Enter to save
-    press_key(&mut app, KeyCode::Enter);
+    // Press Ctrl+S to save
+    press_key_mod(
+        &mut app,
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
     assert_eq!(app.state.input_mode, InputMode::Normal);
 
     // Task should now be in the board
@@ -3868,7 +3880,11 @@ fn test_create_task_without_description() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Quick fix");
     press_key(&mut app, KeyCode::Enter); // to description
-    press_key(&mut app, KeyCode::Enter); // save with empty description
+    press_key_mod(
+        &mut app,
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ); // save with empty description
 
     assert_eq!(app.state.board.tasks.len(), 1);
     let task = &app.state.board.tasks[0];
@@ -3887,6 +3903,72 @@ fn test_create_task_cancel_with_esc() {
 
     assert_eq!(app.state.input_mode, InputMode::Normal);
     assert!(app.state.board.tasks.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_description_enter_inserts_newline() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "My task");
+    press_key(&mut app, KeyCode::Enter); // advance title → description
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    type_str(&mut app, "line one");
+    press_key(&mut app, KeyCode::Enter); // should insert newline, not save
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    type_str(&mut app, "line two");
+
+    assert_eq!(app.state.input_buffer, "line one\nline two");
+    assert!(app.state.board.tasks.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_description_alt_enter_inserts_newline() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "My task");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    type_str(&mut app, "first");
+    press_key_mod(
+        &mut app,
+        KeyCode::Enter,
+        crossterm::event::KeyModifiers::ALT,
+    );
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    type_str(&mut app, "second");
+
+    assert_eq!(app.state.input_buffer, "first\nsecond");
+    assert!(app.state.board.tasks.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_description_ctrl_s_saves() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Save test");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    type_str(&mut app, "line one");
+    press_key(&mut app, KeyCode::Enter);
+    type_str(&mut app, "line two");
+    press_key_mod(
+        &mut app,
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+
+    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert_eq!(app.state.board.tasks.len(), 1);
+    assert_eq!(
+        app.state.board.tasks[0].description.as_deref(),
+        Some("line one\nline two")
+    );
 }
 
 // --- Board navigation ---
@@ -4149,7 +4231,11 @@ fn test_wizard_saves_with_selected_plugin() {
         .clone();
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.state.input_mode, InputMode::InputDescription);
-    press_key(&mut app, KeyCode::Enter); // save with no description
+    press_key_mod(
+        &mut app,
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ); // save with no description
 
     let tasks = app.state.board.tasks.clone();
     assert_eq!(tasks.len(), 1);
@@ -4170,7 +4256,11 @@ fn test_wizard_default_plugin_saves_agtx() {
     assert_eq!(app.state.wizard_plugin_options[0].name, "agtx");
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.state.input_mode, InputMode::InputDescription);
-    press_key(&mut app, KeyCode::Enter); // save with no description
+    press_key_mod(
+        &mut app,
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ); // save with no description
 
     let tasks = app.state.board.tasks.clone();
     assert_eq!(tasks.len(), 1);
@@ -4190,7 +4280,11 @@ fn test_wizard_uses_config_default_agent() {
         press_key(&mut app, KeyCode::Enter);
     }
     assert_eq!(app.state.input_mode, InputMode::InputDescription);
-    press_key(&mut app, KeyCode::Enter);
+    press_key_mod(
+        &mut app,
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
 
     let tasks = app.state.board.tasks.clone();
     assert_eq!(tasks.len(), 1);

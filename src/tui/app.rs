@@ -63,7 +63,7 @@ fn build_footer_text(
             " [j/k] select plugin  [Tab] cycle  [Enter] next  [Esc] cancel ".to_string()
         }
         InputMode::InputDescription => {
-            " [#] files  [/] skills  [!] tasks  [Esc] cancel  [\\+Enter] newline  [Enter] save "
+            " [#] files  [/] skills  [!] tasks  [Ctrl+S] save  [Enter] newline  [Esc] cancel "
                 .to_string()
         }
     }
@@ -3932,18 +3932,13 @@ impl App {
             KeyCode::Esc => {
                 self.cancel_wizard();
             }
+            KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                self.save_task()?;
+                self.cancel_wizard();
+            }
             KeyCode::Enter => {
-                // Check if line ends with backslash for line continuation
-                if self.state.input_buffer.ends_with('\\') {
-                    // Remove backslash and insert newline
-                    self.state.input_buffer.pop();
-                    self.state.input_buffer.push('\n');
-                    self.state.input_cursor = self.state.input_buffer.len();
-                } else {
-                    // Save task (create or update)
-                    self.save_task()?;
-                    self.cancel_wizard();
-                }
+                self.state.input_buffer.insert(self.state.input_cursor, '\n');
+                self.state.input_cursor += 1;
             }
             KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
                 self.state.input_cursor =
