@@ -3337,14 +3337,12 @@ impl App {
                 self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
-                if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                }
+                self.state.input_cursor =
+                    prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Right => {
-                if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_cursor += 1;
-                }
+                self.state.input_cursor =
+                    next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Home => {
                 self.state.input_cursor = 0;
@@ -3354,18 +3352,20 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let new = prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state.input_buffer.drain(new..self.state.input_cursor);
+                    self.state.input_cursor = new;
                 }
             }
             KeyCode::Delete => {
                 if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let end = next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state.input_buffer.drain(self.state.input_cursor..end);
                 }
             }
             KeyCode::Char(c) => {
                 self.state.input_buffer.insert(self.state.input_cursor, c);
-                self.state.input_cursor += 1;
+                self.state.input_cursor += c.len_utf8();
             }
             _ => {}
         }
@@ -3447,15 +3447,23 @@ impl App {
                     if search.pattern.is_empty() {
                         // Remove the `!` trigger character
                         if self.state.input_cursor > 0 {
-                            self.state.input_cursor -= 1;
-                            self.state.input_buffer.remove(self.state.input_cursor);
+                            let new = prev_char_boundary(
+                                &self.state.input_buffer,
+                                self.state.input_cursor,
+                            );
+                            self.state.input_buffer.drain(new..self.state.input_cursor);
+                            self.state.input_cursor = new;
                         }
                         self.state.task_ref_search = None;
                     } else {
                         search.pattern.pop();
                         if self.state.input_cursor > 0 {
-                            self.state.input_cursor -= 1;
-                            self.state.input_buffer.remove(self.state.input_cursor);
+                            let new = prev_char_boundary(
+                                &self.state.input_buffer,
+                                self.state.input_cursor,
+                            );
+                            self.state.input_buffer.drain(new..self.state.input_cursor);
+                            self.state.input_cursor = new;
                         }
                         let query = search.pattern.clone();
                         let matches = self.get_all_task_matches(&query);
@@ -3470,7 +3478,7 @@ impl App {
                         search.pattern.push(c);
                     }
                     self.state.input_buffer.insert(self.state.input_cursor, c);
-                    self.state.input_cursor += 1;
+                    self.state.input_cursor += c.len_utf8();
                     let query = self
                         .state
                         .task_ref_search
@@ -3549,15 +3557,17 @@ impl App {
                         self.state.skill_search = None;
                     } else {
                         search.pattern.pop();
-                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
-                        self.state.input_buffer.remove(self.state.input_cursor);
+                        let new =
+                            prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                        self.state.input_buffer.drain(new..self.state.input_cursor);
+                        self.state.input_cursor = new;
                         self.update_skill_search_matches();
                     }
                 }
                 KeyCode::Char(c) => {
                     search.pattern.push(c);
                     self.state.input_buffer.insert(self.state.input_cursor, c);
-                    self.state.input_cursor += 1;
+                    self.state.input_cursor += c.len_utf8();
                     self.update_skill_search_matches();
                 }
                 _ => {}
@@ -3618,19 +3628,19 @@ impl App {
                     if search.pattern.is_empty() {
                         // Cancel search if pattern is empty
                         self.state.input_buffer.pop(); // Remove the trigger char
-                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
+                        self.state.input_cursor = self.state.input_buffer.len();
                         self.state.file_search = None;
                     } else {
                         search.pattern.pop();
                         self.state.input_buffer.pop();
-                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
+                        self.state.input_cursor = self.state.input_buffer.len();
                         self.update_file_search_matches();
                     }
                 }
                 KeyCode::Char(c) => {
                     search.pattern.push(c);
                     self.state.input_buffer.push(c);
-                    self.state.input_cursor += 1;
+                    self.state.input_cursor = self.state.input_buffer.len();
                     self.update_file_search_matches();
                 }
                 _ => {}
@@ -3681,14 +3691,12 @@ impl App {
                 self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
-                if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                }
+                self.state.input_cursor =
+                    prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Right => {
-                if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_cursor += 1;
-                }
+                self.state.input_cursor =
+                    next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Home => {
                 self.state.input_cursor = 0;
@@ -3698,13 +3706,15 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let new = prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state.input_buffer.drain(new..self.state.input_cursor);
+                    self.state.input_cursor = new;
                 }
             }
             KeyCode::Delete => {
                 if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let end = next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state.input_buffer.drain(self.state.input_cursor..end);
                 }
             }
             KeyCode::Char('#') | KeyCode::Char('@') => {
@@ -3809,7 +3819,7 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.state.input_buffer.insert(self.state.input_cursor, c);
-                self.state.input_cursor += 1;
+                self.state.input_cursor += c.len_utf8();
             }
             _ => {}
         }
@@ -6896,41 +6906,71 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
     style
 }
 
+fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    let mut i = pos;
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        i -= 1;
+        if s.is_char_boundary(i) {
+            return i;
+        }
+    }
+}
+
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut i = pos + 1;
+    while i < s.len() {
+        if s.is_char_boundary(i) {
+            return i;
+        }
+        i += 1;
+    }
+    s.len()
+}
+
 /// Find the previous word boundary (for Option+Left)
 fn word_boundary_left(s: &str, pos: usize) -> usize {
-    if pos == 0 {
+    let chars: Vec<(usize, char)> = s[..pos].char_indices().collect();
+    if chars.is_empty() {
         return 0;
     }
-    let bytes = s.as_bytes();
-    let mut i = pos - 1;
-    // Skip whitespace/punctuation
-    while i > 0 && !bytes[i].is_ascii_alphanumeric() {
+    let mut i = chars.len();
+    while i > 0 && !chars[i - 1].1.is_alphanumeric() {
         i -= 1;
     }
-    // Skip word characters
-    while i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
+    while i > 0 && chars[i - 1].1.is_alphanumeric() {
         i -= 1;
     }
-    i
+    if i >= chars.len() {
+        0
+    } else {
+        chars[i].0
+    }
 }
 
 /// Find the next word boundary (for Option+Right)
 fn word_boundary_right(s: &str, pos: usize) -> usize {
-    let len = s.len();
-    if pos >= len {
-        return len;
+    let chars: Vec<(usize, char)> = s[pos..].char_indices().map(|(i, c)| (pos + i, c)).collect();
+    if chars.is_empty() {
+        return s.len();
     }
-    let bytes = s.as_bytes();
-    let mut i = pos;
-    // Skip current word characters
-    while i < len && bytes[i].is_ascii_alphanumeric() {
+    let mut i = 0;
+    while i < chars.len() && chars[i].1.is_alphanumeric() {
         i += 1;
     }
-    // Skip whitespace/punctuation
-    while i < len && !bytes[i].is_ascii_alphanumeric() {
+    while i < chars.len() && !chars[i].1.is_alphanumeric() {
         i += 1;
     }
-    i
+    if i >= chars.len() {
+        s.len()
+    } else {
+        chars[i].0
+    }
 }
 
 /// Build styled Text with highlighted file paths
