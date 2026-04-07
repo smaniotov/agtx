@@ -7736,13 +7736,78 @@ fn send_skill_and_prompt(
     agent_name: &str,
     auto_dismiss: &[crate::config::AutoDismiss],
 ) {
-    // Gemini, Codex & OpenCode: always combine skill+prompt into a single message.
+    // Codex: $skill-name is an inline reference inserted via a picker popup.
+    // The popup must be confirmed (Enter) before typing the prompt — combining
+    // them as "$skill\n\nprompt" breaks the single-line composer because raw \n
+    // bytes sent through tmux may fire as Enter, submitting before the prompt
+    // is typed. Use a sequential two-phase send instead.
+    if agent_name == "codex" {
+        if let Some(cmd) = skill_cmd {
+            let _ = tmux_ops.send_keys_literal(target, cmd);
+            // Wait for skill name to appear in pane (picker needs rendered input)
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(cmd.as_str()) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Enter confirms the picker popup, inserting the skill reference
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            // Wait for popup to close before typing the prompt
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if !content.contains("Press enter to insert") {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        // Type the prompt after the skill reference is inserted (or alone if no skill)
+        let oneline;
+        let text_to_send: Option<&str> = if !prompt.is_empty() {
+            Some(prompt)
+        } else if skill_cmd.is_none() {
+            oneline = task_content
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !oneline.is_empty() {
+                Some(&oneline)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(text) = text_to_send {
+            let _ = tmux_ops.send_keys_literal(target, text);
+            let check_str = text.lines().next().unwrap_or(text);
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(check_str) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let _ = tmux_ops.send_keys_literal(target, "Enter");
+        return;
+    }
+
+    // Gemini, Cursor & OpenCode: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
-    // Codex: skill mentions ($skill-name) are inline references that must be
-    //   part of a message — sending just "$skill" standalone does nothing.
-    // OpenCode: same Ink TUI behavior as Gemini/Codex, needs combined send + double Enter.
-    if matches!(agent_name, "gemini" | "codex" | "cursor" | "opencode") {
+    // OpenCode: same Ink TUI behavior as Gemini, needs combined send + double Enter.
+    if matches!(agent_name, "gemini" | "cursor" | "opencode") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -7781,24 +7846,9 @@ fn send_skill_and_prompt(
             std::thread::sleep(std::time::Duration::from_millis(200));
             let _ = tmux_ops.send_keys_literal(target, "Enter");
 
-            // Codex and OpenCode show a command picker popup when a skill is typed.
-            // The first Enter confirms/closes the picker; a second Enter is needed
-            // to actually submit the message.
-            // - Codex: wait for "Press enter to insert" to disappear
-            // - OpenCode: wait a short delay (picker closes immediately on Enter)
-            if agent_name == "codex" {
-                for _ in 0..20 {
-                    // up to 4s
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    if let Ok(content) = tmux_ops.capture_pane(target) {
-                        if !content.contains("Press enter to insert") {
-                            break;
-                        }
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-            } else if agent_name == "opencode" {
+            // OpenCode shows a command picker popup when a skill is typed.
+            // The first Enter confirms/closes the picker; a second Enter submits.
+            if agent_name == "opencode" {
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 let _ = tmux_ops.send_keys_literal(target, "Enter");
             }

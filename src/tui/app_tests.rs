@@ -1836,14 +1836,14 @@ fn test_transform_plugin_command() {
         skills::transform_plugin_command("/gsd:discuss-phase 1", "opencode"),
         Some("/gsd-discuss-phase 1".to_string())
     );
-    // Codex: slash → dollar, colon → hyphen
+    // Codex: slash → dollar, colon → hyphen, args stripped (picker needs exact name)
     assert_eq!(
         skills::transform_plugin_command("/gsd:plan-phase 1", "codex"),
-        Some("$gsd-plan-phase 1".to_string())
+        Some("$gsd-plan-phase".to_string())
     );
     assert_eq!(
         skills::transform_plugin_command("/gsd:execute-phase 1", "codex"),
-        Some("$gsd-execute-phase 1".to_string())
+        Some("$gsd-execute-phase".to_string())
     );
     // Spec-kit style (dot separator, no colon): transform only affects colon
     assert_eq!(
@@ -2106,14 +2106,14 @@ fn test_resolve_skill_command_with_plugin() {
         resolve_skill_command(&plugin, "research", "opencode", "", 1),
         Some("/gsd-discuss-phase 1".to_string())
     );
-    // Codex: slash → dollar, colon → hyphen
+    // Codex: slash → dollar, colon → hyphen, args stripped (picker needs exact name)
     assert_eq!(
         resolve_skill_command(&plugin, "planning", "codex", "", 1),
-        Some("$gsd-plan-phase 1".to_string())
+        Some("$gsd-plan-phase".to_string())
     );
     assert_eq!(
         resolve_skill_command(&plugin, "running", "codex", "", 1),
-        Some("$gsd-execute-phase 1".to_string())
+        Some("$gsd-execute-phase".to_string())
     );
     // Unsupported agents: None (will use file-path fallback in prompt)
     assert_eq!(
@@ -7888,11 +7888,11 @@ fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
         .returning(|_| Ok(String::new()));
     mock_tmux
         .expect_send_keys()
-        .withf(|_, cmd: &str| cmd == "codex --full-auto")
+        .withf(|_, cmd: &str| cmd == "codex --yolo")
         .times(1)
         .returning(|_, _| Ok(()));
 
-    switch_agent_in_tmux(&mock_tmux, "proj:task", "codex", "codex --full-auto");
+    switch_agent_in_tmux(&mock_tmux, "proj:task", "codex", "codex --yolo");
 }
 
 #[test]
