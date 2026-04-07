@@ -894,6 +894,13 @@ impl App {
                     500,
                     self.state.tmux_ops.as_ref(),
                 );
+                if !popup.terminal_window_name.is_empty() {
+                    popup.terminal_cached_content = capture_tmux_pane_with_history(
+                        &popup.terminal_window_name,
+                        500,
+                        self.state.tmux_ops.as_ref(),
+                    );
+                }
             }
 
             // Apply results from background session refresh (non-blocking)
@@ -2128,10 +2135,9 @@ impl App {
         let popup_area =
             centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
 
-        // Parse ANSI escape sequences for colors
-        let styled_lines = parse_ansi_to_lines(&popup.cached_content);
+        let agent_styled_lines = parse_ansi_to_lines(&popup.cached_content);
+        let terminal_styled_lines = parse_ansi_to_lines(&popup.terminal_cached_content);
 
-        // Build colors from theme
         let colors = shell_popup::ShellPopupColors {
             border: hex_to_color(&theme.color_popup_border),
             header_fg: Color::Black,
@@ -2142,7 +2148,14 @@ impl App {
             escalation_bg: Color::Yellow,
         };
 
-        shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
+        shell_popup::render_shell_popup(
+            popup,
+            frame,
+            popup_area,
+            agent_styled_lines,
+            terminal_styled_lines,
+            &colors,
+        );
     }
 
     fn draw_task_card(
@@ -3244,9 +3257,11 @@ impl App {
 
     fn handle_shell_popup_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         use crossterm::event::KeyModifiers;
+        use shell_popup::TaskTab;
 
         if let Some(ref mut popup) = self.state.shell_popup {
             let window_name = popup.window_name.clone();
+            let terminal_window_name = popup.terminal_window_name.clone();
             let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
             // Dismiss escalation note on any key press (before forwarding)
@@ -3270,47 +3285,146 @@ impl App {
                 return Ok(());
             }
 
+            // Ctrl+T cycles through tabs (Agent → Diff → Terminal → Agent)
+            if has_ctrl && key.code == KeyCode::Char('t') {
+                popup.active_tab = popup.active_tab.next();
+                return Ok(());
+            }
+
             match key.code {
-                // Ctrl+q = close popup
+                // Ctrl+q = close popup (terminal window stays alive in background)
                 KeyCode::Char('q') if has_ctrl => {
                     self.state.shell_popup = None;
                 }
-                // Scroll up with Ctrl+k or Ctrl+p or Ctrl+Up
+                // Scroll up — dispatched to the active tab's offset
                 KeyCode::Char('k') | KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
-                    popup.scroll_up(5);
+                    match popup.active_tab {
+                        TaskTab::Agent => popup.scroll_up(5),
+                        TaskTab::Terminal => {
+                            popup.terminal_scroll =
+                                (popup.terminal_scroll - 5).max(
+                                    -(String::from_utf8_lossy(&popup.terminal_cached_content)
+                                        .lines()
+                                        .count() as i32),
+                                );
+                        }
+                        TaskTab::Diff => {}
+                    }
                 }
-                // Scroll down with Ctrl+j or Ctrl+n or Ctrl+Down
+                // Scroll down
                 KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
-                    popup.scroll_down(5);
+                    match popup.active_tab {
+                        TaskTab::Agent => popup.scroll_down(5),
+                        TaskTab::Terminal => {
+                            popup.terminal_scroll = (popup.terminal_scroll + 5).min(0);
+                        }
+                        TaskTab::Diff => {}
+                    }
                 }
-                // Page up with Ctrl+u or PageUp
+                // Page up
                 KeyCode::Char('u') if has_ctrl => {
-                    popup.scroll_up(20);
+                    match popup.active_tab {
+                        TaskTab::Agent => popup.scroll_up(20),
+                        TaskTab::Terminal => {
+                            popup.terminal_scroll =
+                                (popup.terminal_scroll - 20).max(
+                                    -(String::from_utf8_lossy(&popup.terminal_cached_content)
+                                        .lines()
+                                        .count() as i32),
+                                );
+                        }
+                        TaskTab::Diff => {}
+                    }
                 }
-                KeyCode::PageUp => {
-                    popup.scroll_up(20);
-                }
-                // Page down with Ctrl+d or PageDown
+                KeyCode::PageUp => match popup.active_tab {
+                    TaskTab::Agent => popup.scroll_up(20),
+                    TaskTab::Terminal => {
+                        popup.terminal_scroll = (popup.terminal_scroll - 20).max(
+                            -(String::from_utf8_lossy(&popup.terminal_cached_content)
+                                .lines()
+                                .count() as i32),
+                        );
+                    }
+                    TaskTab::Diff => {
+                        popup.diff_scroll = popup.diff_scroll.saturating_sub(20);
+                    }
+                },
+                // Page down
                 KeyCode::Char('d') if has_ctrl => {
-                    popup.scroll_down(20);
+                    match popup.active_tab {
+                        TaskTab::Agent => popup.scroll_down(20),
+                        TaskTab::Terminal => {
+                            popup.terminal_scroll = (popup.terminal_scroll + 20).min(0);
+                        }
+                        TaskTab::Diff => {}
+                    }
                 }
-                KeyCode::PageDown => {
-                    popup.scroll_down(20);
-                }
-                // Ctrl+g = go to bottom (current)
-                KeyCode::Char('g') if has_ctrl => {
-                    popup.scroll_to_bottom();
-                }
-                _ => {
-                    // Forward all other keys to tmux window (including Esc)
-                    send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
-                    // After sending a key, refresh content to show the result
-                    popup.cached_content = capture_tmux_pane_with_history(
-                        &window_name,
-                        500,
-                        self.state.tmux_ops.as_ref(),
-                    );
-                }
+                KeyCode::PageDown => match popup.active_tab {
+                    TaskTab::Agent => popup.scroll_down(20),
+                    TaskTab::Terminal => {
+                        popup.terminal_scroll = (popup.terminal_scroll + 20).min(0);
+                    }
+                    TaskTab::Diff => {
+                        popup.diff_scroll = popup.diff_scroll.saturating_add(20);
+                    }
+                },
+                // Ctrl+g = go to bottom (Agent and Terminal only)
+                KeyCode::Char('g') if has_ctrl => match popup.active_tab {
+                    TaskTab::Agent => popup.scroll_to_bottom(),
+                    TaskTab::Terminal => popup.terminal_scroll = 0,
+                    TaskTab::Diff => {}
+                },
+                _ => match popup.active_tab {
+                    TaskTab::Agent => {
+                        // Forward all other keys to the agent tmux window
+                        send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
+                        popup.cached_content = capture_tmux_pane_with_history(
+                            &window_name,
+                            500,
+                            self.state.tmux_ops.as_ref(),
+                        );
+                    }
+                    TaskTab::Diff => {
+                        // Diff is read-only — handle vim-style scroll keys, ignore the rest
+                        match key.code {
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                popup.diff_scroll = popup.diff_scroll.saturating_add(1);
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                popup.diff_scroll = popup.diff_scroll.saturating_sub(1);
+                            }
+                            KeyCode::Char('d') => {
+                                popup.diff_scroll = popup.diff_scroll.saturating_add(20);
+                            }
+                            KeyCode::Char('u') => {
+                                popup.diff_scroll = popup.diff_scroll.saturating_sub(20);
+                            }
+                            KeyCode::Char('g') => {
+                                popup.diff_scroll = 0;
+                            }
+                            KeyCode::Char('G') => {
+                                popup.diff_scroll =
+                                    popup.diff_content.lines().count().saturating_sub(10);
+                            }
+                            _ => {}
+                        }
+                    }
+                    TaskTab::Terminal => {
+                        // Forward all other keys to the extra terminal window
+                        if !terminal_window_name.is_empty() {
+                            send_key_to_tmux(
+                                &terminal_window_name,
+                                key.code,
+                                self.state.tmux_ops.as_ref(),
+                            );
+                            popup.terminal_cached_content = capture_tmux_pane_with_history(
+                                &terminal_window_name,
+                                500,
+                                self.state.tmux_ops.as_ref(),
+                            );
+                        }
+                    }
+                },
             }
         }
         Ok(())
@@ -5694,33 +5808,101 @@ impl App {
             if let Some(window_name) = &task.session_name.clone() {
                 let task_id = task.id.clone();
                 let escalation_note = task.escalation_note.clone();
+                let worktree_path = task.worktree_path.clone();
+                let task_plugin = task.plugin.clone();
                 let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
                 popup.task_id = Some(task_id);
                 popup.escalation_note = escalation_note;
 
                 // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
+                // -5 for borders + title + tab bar + footer (one extra row vs before)
                 if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
                     let pane_width = SHELL_POPUP_CONTENT_WIDTH;
                     let popup_height =
                         (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
-                    let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
+                    let pane_height = popup_height.saturating_sub(5);
 
-                    let target = format!("{}:{}", self.state.tmux_project_name, window_name);
                     // TODO the resize should be done on target which is
                     // session_name:window_name, but for some reason that doesn't work
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
                     let _ =
                         self.state
                             .tmux_ops
-                            .resize_window(&window_name, pane_width, pane_height);
+                            .resize_window(window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                     // Give TUI apps (OpenCode, Gemini Ink) time to re-render after resize
                     std::thread::sleep(std::time::Duration::from_millis(200));
+
                 }
 
-                // Capture initial content
+                // Load diff content for the Diff tab
+                if let Some(ref wt_path) = worktree_path {
+                    let mut exclude_prefixes: Vec<&str> =
+                        crate::git::AGENT_CONFIG_DIRS.to_vec();
+                    let plugin = task_plugin.as_deref().and_then(|name| {
+                        WorkflowPlugin::load(name, self.state.project_path.as_deref())
+                            .ok()
+                            .or_else(|| skills::load_bundled_plugin(name))
+                    });
+                    let plugin_dirs: Vec<String> =
+                        plugin.map_or_else(Vec::new, |p| p.copy_dirs.clone());
+                    let plugin_dir_refs: Vec<&str> =
+                        plugin_dirs.iter().map(|s| s.as_str()).collect();
+                    exclude_prefixes.extend(plugin_dir_refs);
+                    popup.diff_content = collect_task_diff(
+                        wt_path,
+                        self.state.git_ops.as_ref(),
+                        &exclude_prefixes,
+                    );
+                }
+
+                // Create or reuse the extra terminal window for the Terminal tab
+                let terminal_window_name = format!("{}-term", window_name);
+                let term_target = format!(
+                    "{}:{}",
+                    self.state.tmux_project_name, terminal_window_name
+                );
+                let terminal_is_new = !self
+                    .state
+                    .tmux_ops
+                    .window_exists(&term_target)
+                    .unwrap_or(false);
+                if terminal_is_new {
+                    let worktree_dir = worktree_path.as_deref().unwrap_or(".");
+                    let _ = self.state.tmux_ops.create_window(
+                        &self.state.tmux_project_name,
+                        &terminal_window_name,
+                        worktree_dir,
+                        None,
+                    );
+                }
+
+                // Resize terminal window to match popup content dimensions
+                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+                    let popup_height =
+                        (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                    let pane_height = popup_height.saturating_sub(5);
+                    let _ = self.state.tmux_ops.resize_window(
+                        &terminal_window_name,
+                        SHELL_POPUP_CONTENT_WIDTH,
+                        pane_height,
+                    );
+                    if terminal_is_new {
+                        // Give the shell time to start and render its prompt
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    }
+                }
+
+                popup.terminal_window_name = terminal_window_name.clone();
+
+                // Capture initial content for both panes
                 popup.cached_content =
                     capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
+                popup.terminal_cached_content = capture_tmux_pane_with_history(
+                    &terminal_window_name,
+                    500,
+                    self.state.tmux_ops.as_ref(),
+                );
 
                 self.state.shell_popup = Some(popup);
             }
@@ -6502,6 +6684,7 @@ fn cleanup_task_for_done(
 
     if let Some(session_name) = &task.session_name {
         let _ = tmux_ops.kill_window(session_name);
+        let _ = tmux_ops.kill_window(&format!("{}-term", session_name));
     }
     if let Some(worktree) = &task.worktree_path {
         if let Err(e) = run_cleanup_script_for_worktree(
@@ -6561,6 +6744,7 @@ fn cleanup_task_resources(
 
     if let Some(session_name) = session_name {
         let _ = tmux_ops.kill_window(session_name);
+        let _ = tmux_ops.kill_window(&format!("{}-term", session_name));
     }
     if let Some(worktree) = worktree_path {
         if let Err(e) = run_cleanup_script_for_worktree(
@@ -6763,6 +6947,7 @@ fn delete_task_resources(
     // Kill tmux window if exists
     if let Some(ref session_name) = task.session_name {
         let _ = tmux_ops.kill_window(session_name);
+        let _ = tmux_ops.kill_window(&format!("{}-term", session_name));
     }
 
     // Remove worktree and delete branch if exists

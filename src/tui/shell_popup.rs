@@ -1,6 +1,24 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+/// Which tab is active in the task popup
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskTab {
+    Agent,
+    Diff,
+    Terminal,
+}
+
+impl TaskTab {
+    pub fn next(&self) -> Self {
+        match self {
+            TaskTab::Agent => TaskTab::Diff,
+            TaskTab::Diff => TaskTab::Terminal,
+            TaskTab::Terminal => TaskTab::Agent,
+        }
+    }
+}
+
 /// State for the shell popup that shows a detached tmux window
 #[derive(Debug, Clone)]
 pub struct ShellPopup {
@@ -15,6 +33,18 @@ pub struct ShellPopup {
     pub escalation_note: Option<String>,
     /// Task ID (used to clear escalation note on dismiss)
     pub task_id: Option<String>,
+    /// Currently active tab
+    pub active_tab: TaskTab,
+    /// Git diff content for the Diff tab (loaded on popup open)
+    pub diff_content: String,
+    /// Scroll offset for the Diff tab
+    pub diff_scroll: usize,
+    /// Name of the extra terminal tmux window (e.g. "{window_name}-term")
+    pub terminal_window_name: String,
+    /// Cached content for the Terminal tab
+    pub terminal_cached_content: Vec<u8>,
+    /// Scroll offset for the Terminal tab
+    pub terminal_scroll: i32,
 }
 
 impl ShellPopup {
@@ -27,6 +57,12 @@ impl ShellPopup {
             last_pane_size: None,
             escalation_note: None,
             task_id: None,
+            active_tab: TaskTab::Agent,
+            diff_content: String::new(),
+            diff_scroll: 0,
+            terminal_window_name: String::new(),
+            terminal_cached_content: Vec::new(),
+            terminal_scroll: 0,
         }
     }
 
@@ -115,7 +151,7 @@ pub fn compute_visible_lines<'a>(
     (visible_lines, start_line, total_lines)
 }
 
-/// Build the footer text for the shell popup
+/// Build the footer text for the shell popup (legacy — kept for existing tests)
 pub fn build_footer_text(scroll_offset: i32, start_line: usize) -> String {
     if scroll_offset < 0 {
         format!(
@@ -124,6 +160,25 @@ pub fn build_footer_text(scroll_offset: i32, start_line: usize) -> String {
         )
     } else {
         " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+q] close | At bottom ".to_string()
+    }
+}
+
+/// Build the footer text for a tabbed popup, reflecting the active tab's keybindings
+pub fn build_tab_footer_text(active_tab: &TaskTab, scroll_offset: i32, start_line: usize) -> String {
+    match active_tab {
+        TaskTab::Diff => {
+            " [j/k] scroll  [d/u] page  [g/G] top/bot  [Ctrl+T] tab  [Ctrl+q] close ".to_string()
+        }
+        TaskTab::Agent | TaskTab::Terminal => {
+            if scroll_offset < 0 {
+                format!(
+                    " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+g] bottom [Ctrl+T] tab [Ctrl+q] close | Line {} ",
+                    start_line + 1
+                )
+            } else {
+                " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+T] tab [Ctrl+q] close | At bottom ".to_string()
+            }
+        }
     }
 }
 
@@ -241,13 +296,15 @@ impl Default for ShellPopupColors {
 /// This function handles the complete rendering of the shell popup:
 /// - Border with title
 /// - Header bar with task title
-/// - Content area with parsed terminal output
+/// - Tab bar (Agent / Diff / Terminal)
+/// - Content area (per active tab)
 /// - Footer with scroll status and keybindings
 pub fn render_shell_popup(
     popup: &ShellPopup,
     frame: &mut Frame,
     popup_area: Rect,
-    styled_lines: Vec<Line<'_>>,
+    agent_styled_lines: Vec<Line<'_>>,
+    terminal_styled_lines: Vec<Line<'_>>,
     colors: &ShellPopupColors,
 ) {
     frame.render_widget(Clear, popup_area);
@@ -259,17 +316,18 @@ pub fn render_shell_popup(
     let inner_area = border_block.inner(popup_area);
     frame.render_widget(border_block, popup_area);
 
-    // Layout: header, optional escalation banner, content, footer (inside the border)
+    // Layout: title, tab bar, optional escalation banner, content, footer
     let has_escalation = popup.escalation_note.is_some();
     let escalation_height = if has_escalation { 2u16 } else { 0u16 };
 
     let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                 // Title bar
-            Constraint::Length(escalation_height), // Escalation banner (0 if none)
-            Constraint::Min(0),                    // Shell content
-            Constraint::Length(1),                 // Footer
+            Constraint::Length(1),                 // [0] Title bar
+            Constraint::Length(1),                 // [1] Tab bar
+            Constraint::Length(escalation_height), // [2] Escalation banner (0 if none)
+            Constraint::Min(0),                    // [3] Content
+            Constraint::Length(1),                 // [4] Footer
         ])
         .split(inner_area);
 
@@ -280,18 +338,37 @@ pub fn render_shell_popup(
         .style(Style::default().fg(colors.header_fg).bg(colors.header_bg));
     frame.render_widget(title_bar, popup_chunks[0]);
 
+    // Tab bar: three segments, active one highlighted
+    let tab_labels = [
+        (" 1:Agent ", TaskTab::Agent),
+        (" 2:Diff ", TaskTab::Diff),
+        (" 3:Terminal ", TaskTab::Terminal),
+    ];
+    let tab_spans: Vec<Span> = tab_labels
+        .iter()
+        .map(|(label, tab)| {
+            if *tab == popup.active_tab {
+                Span::styled(*label, Style::default().fg(colors.header_fg).bg(colors.header_bg))
+            } else {
+                Span::styled(*label, Style::default().fg(colors.footer_fg).bg(colors.footer_bg))
+            }
+        })
+        .collect();
+    let tab_bar = Paragraph::new(Line::from(tab_spans));
+    frame.render_widget(tab_bar, popup_chunks[1]);
+
     // Escalation banner (if present)
     if let Some(ref note) = popup.escalation_note {
         let banner_text = format!(" \u{26a0}  {} ", note);
         let padded_banner = format!(
             "{:<width$}",
             banner_text,
-            width = popup_chunks[1].width as usize
+            width = popup_chunks[2].width as usize
         );
         let hint = format!(
             "{:<width$}",
             " Press any key to dismiss",
-            width = popup_chunks[1].width as usize
+            width = popup_chunks[2].width as usize
         );
         let banner_content = format!("{}\n{}", padded_banner, hint);
         let banner = Paragraph::new(banner_content).style(
@@ -299,27 +376,66 @@ pub fn render_shell_popup(
                 .fg(colors.escalation_fg)
                 .bg(colors.escalation_bg),
         );
-        frame.render_widget(banner, popup_chunks[1]);
+        frame.render_widget(banner, popup_chunks[2]);
     }
 
-    // Shell content
-    let visible_height = popup_chunks[2].height as usize;
+    // Content (per active tab)
+    let visible_height = popup_chunks[3].height as usize;
+    let start_line = match popup.active_tab {
+        TaskTab::Agent => {
+            let (visible_lines, start_line, _) =
+                compute_visible_lines(agent_styled_lines, visible_height, popup.scroll_offset);
+            frame.render_widget(Paragraph::new(visible_lines), popup_chunks[3]);
+            start_line
+        }
+        TaskTab::Diff => {
+            let lines: Vec<Line> = popup
+                .diff_content
+                .lines()
+                .skip(popup.diff_scroll)
+                .take(visible_height)
+                .map(|line| {
+                    let style = if line.starts_with('+') && !line.starts_with("+++") {
+                        Style::default().fg(Color::Green)
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        Style::default().fg(Color::Red)
+                    } else if line.starts_with("@@") {
+                        Style::default().fg(Color::Cyan)
+                    } else if line.starts_with("diff ") || line.starts_with("index ") {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    Line::from(Span::styled(line, style))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), popup_chunks[3]);
+            popup.diff_scroll
+        }
+        TaskTab::Terminal => {
+            let (visible_lines, start_line, _) = compute_visible_lines(
+                terminal_styled_lines,
+                visible_height,
+                popup.terminal_scroll,
+            );
+            frame.render_widget(Paragraph::new(visible_lines), popup_chunks[3]);
+            start_line
+        }
+    };
 
-    // Use the testable helper to compute visible lines
-    let (visible_lines, start_line, _total_lines) =
-        compute_visible_lines(styled_lines, visible_height, popup.scroll_offset);
-
-    let content = Paragraph::new(visible_lines);
-    frame.render_widget(content, popup_chunks[2]);
-
-    // Footer with scroll indicator (pad to fill width)
-    let footer_text = build_footer_text(popup.scroll_offset, start_line);
+    // Footer with tab-aware keybindings (pad to fill width)
+    let scroll_offset = match popup.active_tab {
+        TaskTab::Agent => popup.scroll_offset,
+        TaskTab::Terminal => popup.terminal_scroll,
+        TaskTab::Diff => 0,
+    };
+    let footer_text = build_tab_footer_text(&popup.active_tab, scroll_offset, start_line);
     let padded_footer = format!(
         "{:<width$}",
         footer_text,
-        width = popup_chunks[3].width as usize
+        width = popup_chunks[4].width as usize
     );
     let footer = Paragraph::new(padded_footer)
         .style(Style::default().fg(colors.footer_fg).bg(colors.footer_bg));
-    frame.render_widget(footer, popup_chunks[3]);
+    frame.render_widget(footer, popup_chunks[4]);
 }

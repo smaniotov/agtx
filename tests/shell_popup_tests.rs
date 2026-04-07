@@ -1,6 +1,7 @@
 use agtx::tui::shell_popup::{
-    build_footer_text, compute_visible_lines, render_shell_popup, trim_content_to_cursor,
-    trim_trailing_empty_lines, ShellPopup, ShellPopupColors, MAX_TRAILING_EMPTY_LINES,
+    build_footer_text, build_tab_footer_text, compute_visible_lines, render_shell_popup,
+    trim_content_to_cursor, trim_trailing_empty_lines, ShellPopup, ShellPopupColors,
+    TaskTab, MAX_TRAILING_EMPTY_LINES,
 };
 use ratatui::backend::TestBackend;
 use ratatui::prelude::*;
@@ -223,7 +224,7 @@ fn test_render_shell_popup_basic() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, vec![], &colors);
         })
         .unwrap();
 
@@ -252,7 +253,7 @@ fn test_render_shell_popup_with_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, vec![], &colors);
         })
         .unwrap();
 
@@ -279,7 +280,7 @@ fn test_render_shell_popup_scrolled_up() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, vec![], &colors);
         })
         .unwrap();
 
@@ -304,7 +305,7 @@ fn test_render_shell_popup_empty_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, vec![], &colors);
         })
         .unwrap();
 
@@ -338,7 +339,7 @@ fn test_render_shell_popup_custom_colors() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, vec![], &colors);
         })
         .unwrap();
 
@@ -360,7 +361,7 @@ fn test_render_shell_popup_small_area() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 40, 10);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, vec![], &colors);
         })
         .unwrap();
 
@@ -496,4 +497,137 @@ fn test_trim_content_to_cursor_zero_pane_height() {
     let line_count = result_str.matches('\n').count() + 1;
     // pane_height=0 should fall through to second pass only
     assert_eq!(line_count, 2 + MAX_TRAILING_EMPTY_LINES);
+}
+
+// ── Tab view tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_task_tab_default_is_agent() {
+    let popup = ShellPopup::new("Task".to_string(), "win".to_string());
+    assert_eq!(popup.active_tab, TaskTab::Agent);
+}
+
+#[test]
+fn test_task_tab_cycling() {
+    assert_eq!(TaskTab::Agent.next(), TaskTab::Diff);
+    assert_eq!(TaskTab::Diff.next(), TaskTab::Terminal);
+    assert_eq!(TaskTab::Terminal.next(), TaskTab::Agent);
+}
+
+#[test]
+fn test_shell_popup_new_tab_fields() {
+    let popup = ShellPopup::new("Task".to_string(), "win".to_string());
+    assert_eq!(popup.active_tab, TaskTab::Agent);
+    assert!(popup.diff_content.is_empty());
+    assert_eq!(popup.diff_scroll, 0);
+    assert!(popup.terminal_window_name.is_empty());
+    assert!(popup.terminal_cached_content.is_empty());
+    assert_eq!(popup.terminal_scroll, 0);
+}
+
+#[test]
+fn test_build_tab_footer_agent_at_bottom() {
+    let text = build_tab_footer_text(&TaskTab::Agent, 0, 0);
+    assert!(text.contains("Ctrl+T"));
+    assert!(text.contains("Ctrl+q"));
+    assert!(text.contains("At bottom"));
+}
+
+#[test]
+fn test_build_tab_footer_agent_scrolled_up() {
+    let text = build_tab_footer_text(&TaskTab::Agent, -5, 10);
+    assert!(text.contains("Ctrl+T"));
+    assert!(text.contains("Line 11"));
+}
+
+#[test]
+fn test_build_tab_footer_terminal_at_bottom() {
+    let text = build_tab_footer_text(&TaskTab::Terminal, 0, 0);
+    assert!(text.contains("Ctrl+T"));
+    assert!(text.contains("At bottom"));
+}
+
+#[test]
+fn test_build_tab_footer_diff() {
+    let text = build_tab_footer_text(&TaskTab::Diff, 0, 0);
+    assert!(text.contains("Ctrl+T"));
+    assert!(text.contains("Ctrl+q"));
+    // Diff uses plain j/k, not Ctrl+j/k
+    assert!(text.contains("j/k"));
+    assert!(!text.contains("Ctrl+j"));
+}
+
+#[test]
+fn test_render_shell_popup_agent_tab() {
+    let backend = TestBackend::new(130, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut popup = ShellPopup::new("My Task".to_string(), "win".to_string());
+    popup.active_tab = TaskTab::Agent;
+    popup.cached_content = b"agent output line 1\nagent output line 2".to_vec();
+    let colors = ShellPopupColors::default();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let agent_lines = vec![Line::raw("agent output line 1"), Line::raw("agent output line 2")];
+            render_shell_popup(&popup, frame, area, agent_lines, vec![], &colors);
+        })
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+    assert!(rendered.contains("My Task"));
+    assert!(rendered.contains("1:Agent"));
+}
+
+#[test]
+fn test_render_shell_popup_diff_tab() {
+    let backend = TestBackend::new(130, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut popup = ShellPopup::new("My Task".to_string(), "win".to_string());
+    popup.active_tab = TaskTab::Diff;
+    popup.diff_content = "+added line\n-removed line\n context line".to_string();
+    let colors = ShellPopupColors::default();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            render_shell_popup(&popup, frame, area, vec![], vec![], &colors);
+        })
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+    assert!(rendered.contains("2:Diff"));
+}
+
+#[test]
+fn test_render_shell_popup_terminal_tab() {
+    let backend = TestBackend::new(130, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut popup = ShellPopup::new("My Task".to_string(), "win".to_string());
+    popup.active_tab = TaskTab::Terminal;
+    popup.terminal_window_name = "win-term".to_string();
+    popup.terminal_cached_content = b"shell prompt $".to_vec();
+    let colors = ShellPopupColors::default();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let terminal_lines = vec![Line::raw("shell prompt $")];
+            render_shell_popup(&popup, frame, area, vec![], terminal_lines, &colors);
+        })
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+    assert!(rendered.contains("3:Terminal"));
+}
+
+#[test]
+fn test_diff_scroll_does_not_underflow() {
+    let mut popup = ShellPopup::new("T".to_string(), "w".to_string());
+    popup.active_tab = TaskTab::Diff;
+    popup.diff_content = "line1\nline2\nline3".to_string();
+    // Scrolling up past 0 should clamp at 0
+    popup.diff_scroll = popup.diff_scroll.saturating_sub(100);
+    assert_eq!(popup.diff_scroll, 0);
+}
+
+#[test]
+fn test_terminal_window_name_derived_from_session() {
+    let session = "task-abc12345--proj--my-task";
+    let terminal_name = format!("{}-term", session);
+    assert_eq!(terminal_name, "task-abc12345--proj--my-task-term");
 }
